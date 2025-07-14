@@ -1,8 +1,8 @@
-{ pkgs, ... }:
+{ pkgs, config, ... }:
 
 let
   bitcoind = pkgs.bitcoind;
-  datadir = "./data";
+  datadir = "${config.devenv.root}/.devenv/state/bitcoind";
   bitcoinConf = ./config/bitcoin.conf;
 in
 {
