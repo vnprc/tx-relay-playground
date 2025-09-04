@@ -57,12 +57,14 @@ pub struct TxRelayServer {
     strfry_sender: mpsc::UnboundedSender<Event>,
     strfry_receiver: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Event>>>,
     relay_id: u16,
+    bitcoin_port: u16,
+    strfry_port: u16,
     // Track transactions received from remote relays to avoid rebroadcasting
     remote_transactions: Arc<RwLock<HashSet<String>>>,
 }
 
 impl TxRelayServer {
-    pub fn new(relay_id: u16, bitcoin_port: u16) -> Self {
+    pub fn new(relay_id: u16, bitcoin_port: u16, strfry_port: u16) -> Self {
         let bitcoin_url = format!("http://127.0.0.1:{}", bitcoin_port);
         let bitcoin_client = bitcoin_rpc::BitcoinRpcClient::new(
             bitcoin_url,
@@ -81,6 +83,8 @@ impl TxRelayServer {
             strfry_sender,
             strfry_receiver: Arc::new(tokio::sync::Mutex::new(strfry_receiver)),
             relay_id,
+            bitcoin_port,
+            strfry_port,
             remote_transactions: Arc::new(RwLock::new(HashSet::new())),
         }
     }
@@ -256,7 +260,7 @@ impl TxRelayServer {
         });
         
         let client = reqwest::Client::new();
-        let rpc_url = format!("http://127.0.0.1:{}", 18443 + (self.relay_id - 1));
+        let rpc_url = format!("http://127.0.0.1:{}", self.bitcoin_port);
         let response = client
             .post(&rpc_url)
             .basic_auth("user", Some("password"))
@@ -424,7 +428,7 @@ impl TxRelayServer {
         });
         
         let client = reqwest::Client::new();
-        let rpc_url = format!("http://127.0.0.1:{}", 18443 + (self.relay_id - 1));
+        let rpc_url = format!("http://127.0.0.1:{}", self.bitcoin_port);
         let response = client
             .post(&rpc_url)
             .basic_auth("user", Some("password"))
@@ -459,7 +463,7 @@ impl TxRelayServer {
         });
         
         let client = reqwest::Client::new();
-        let rpc_url = format!("http://127.0.0.1:{}", 18443 + (self.relay_id - 1));
+        let rpc_url = format!("http://127.0.0.1:{}", self.bitcoin_port);
         let response = client
             .post(&rpc_url)
             .basic_auth("user", Some("password"))
@@ -479,7 +483,7 @@ impl TxRelayServer {
     }
     
     async fn connect_to_strfry(&self) -> Result<()> {
-        info!("Relay-{}: Connecting to strfry relay at ws://127.0.0.1:7777", self.relay_id);
+        info!("Relay-{}: Connecting to strfry relay at ws://127.0.0.1:{}", self.relay_id, self.strfry_port);
         
         loop {
             match self.try_connect_to_strfry().await {
@@ -495,7 +499,7 @@ impl TxRelayServer {
     }
     
     async fn try_connect_to_strfry(&self) -> Result<()> {
-        let url = Url::parse("ws://127.0.0.1:7777")?;
+        let url = Url::parse(&format!("ws://127.0.0.1:{}", self.strfry_port))?;
         let (ws_stream, _) = connect_async(url).await?;
         info!("Relay-{}: Connected to strfry relay", self.relay_id);
         
@@ -572,8 +576,13 @@ impl TxRelayServer {
                 let event: Event = serde_json::from_value(arr[2].clone())?;
                 
                 if event.kind.as_u32() == KIND_TX_BROADCAST as u32 {
+                    info!("🌐 Relay-{}: Received transaction broadcast event via Nostr", self.relay_id);
                     self.handle_remote_transaction(event).await?;
+                } else {
+                    info!("Relay-{}: Received non-transaction event (kind: {})", self.relay_id, event.kind.as_u32());
                 }
+            } else {
+                info!("Relay-{}: Received non-EVENT message from strfry: {:?}", self.relay_id, arr.get(0));
             }
         }
         
@@ -639,6 +648,8 @@ impl Clone for TxRelayServer {
             strfry_sender: self.strfry_sender.clone(),
             strfry_receiver: Arc::clone(&self.strfry_receiver),
             relay_id: self.relay_id,
+            bitcoin_port: self.bitcoin_port,
+            strfry_port: self.strfry_port,
             remote_transactions: Arc::clone(&self.remote_transactions),
         }
     }
@@ -652,10 +663,11 @@ async fn main() -> Result<()> {
     let relay_id: u16 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
     let port: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(7779 + relay_id - 1);
     let bitcoin_port: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(18443);
+    let strfry_port: u16 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(7777);
     
     info!("Starting Bitcoin Transaction Relay Server");
     
-    let server = TxRelayServer::new(relay_id, bitcoin_port);
+    let server = TxRelayServer::new(relay_id, bitcoin_port, strfry_port);
     let addr = format!("127.0.0.1:{}", port).parse()?;
     
     server.start(addr).await?;

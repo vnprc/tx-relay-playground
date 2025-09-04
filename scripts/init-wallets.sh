@@ -7,14 +7,21 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 # Bitcoin CLI path
 CLI="/nix/store/m2ds8wlwzbljnmw4kasaqn6578a4g7n1-devenv-profile/bin/bitcoin-cli"
 
-# Node configurations
-NODE1_DATADIR="${PROJECT_ROOT}/.devenv/state/bitcoind"
-NODE1_CONF="${PROJECT_ROOT}/config/bitcoin1.conf"
-NODE1_CLI="$CLI -datadir=$NODE1_DATADIR -conf=$NODE1_CONF -regtest -rpcuser=user -rpcpassword=password"
+# Load port configuration from centralized config
+NODE1_RPC=$(yq eval '.bitcoin.node1.rpc' "${PROJECT_ROOT}/config/ports.toml")
+NODE1_DATADIR=$(yq eval '.bitcoin.node1.datadir' "${PROJECT_ROOT}/config/ports.toml")
+NODE2_RPC=$(yq eval '.bitcoin.node2.rpc' "${PROJECT_ROOT}/config/ports.toml")
+NODE2_DATADIR=$(yq eval '.bitcoin.node2.datadir' "${PROJECT_ROOT}/config/ports.toml")
 
-NODE2_DATADIR="${PROJECT_ROOT}/.devenv/state/bitcoind2"
-NODE2_CONF="${PROJECT_ROOT}/config/bitcoin2.conf"
-NODE2_CLI="$CLI -datadir=$NODE2_DATADIR -conf=$NODE2_CONF -regtest -rpcuser=user -rpcpassword=password -rpcport=18444"
+# Node configurations using centralized config
+NODE1_DATADIR_FULL="${PROJECT_ROOT}/.devenv/state/${NODE1_DATADIR}"
+NODE1_CONF="${PROJECT_ROOT}/config/bitcoin-base.conf"
+NODE1_CLI="$CLI -datadir=$NODE1_DATADIR_FULL -conf=$NODE1_CONF -regtest -rpcuser=user -rpcpassword=password -rpcport=$NODE1_RPC"
+
+NODE2_DATADIR_FULL="${PROJECT_ROOT}/.devenv/state/${NODE2_DATADIR}"
+NODE2_CONF="${PROJECT_ROOT}/config/bitcoin-base.conf"
+NODE2_CLI="$CLI -datadir=$NODE2_DATADIR_FULL -conf=$NODE2_CONF -regtest -rpcuser=user -rpcpassword=password -rpcport=$NODE2_RPC"
+
 
 # Function to wait for a node to be ready
 wait_for_node() {
@@ -77,11 +84,11 @@ wait_for_block_propagation() {
 
 echo "=== Bitcoin Wallet Initialization ==="
 
-# Wait for both nodes to be ready
+# Wait for all nodes to be ready
 wait_for_node "Node 1" "$NODE1_CLI" || exit 1
 wait_for_node "Node 2" "$NODE2_CLI" || exit 1
 
-# Setup wallets for both nodes
+# Setup wallets for all nodes
 setup_wallet "Node 1" "$NODE1_CLI"
 setup_wallet "Node 2" "$NODE2_CLI"
 
@@ -89,7 +96,7 @@ setup_wallet "Node 2" "$NODE2_CLI"
 HEIGHT1=$($NODE1_CLI getblockcount 2>/dev/null || echo "0")
 HEIGHT2=$($NODE2_CLI getblockcount 2>/dev/null || echo "0")
 
-# Use the higher height as reference
+# Use the highest height as reference
 CURRENT_HEIGHT=$((HEIGHT1 > HEIGHT2 ? HEIGHT1 : HEIGHT2))
 
 if [ "$CURRENT_HEIGHT" -ge 102 ]; then
@@ -118,6 +125,7 @@ else
         wait_for_block_propagation 2 || { echo "Block 2 propagation failed!"; exit 1; }
     fi
     
+    
     # Now mine 100+ more blocks to make the early coinbase rewards spendable
     UPDATED_HEIGHT=$($NODE1_CLI getblockcount)
     BLOCKS_NEEDED=$((102 - UPDATED_HEIGHT))
@@ -127,17 +135,17 @@ else
         $NODE1_CLI -rpcwallet=default generatetoaddress $BLOCKS_NEEDED "$ADDR1" >/dev/null 2>&1
         echo "✓ Mined $BLOCKS_NEEDED additional blocks"
         
-        # Wait for Node 2 to sync with Node 1
-        echo "Waiting for Node 2 to sync with Node 1..."
+        # Wait for all nodes to sync
+        echo "Waiting for all nodes to sync..."
         for i in {1..30}; do
             HEIGHT1=$($NODE1_CLI getblockcount 2>/dev/null || echo "0")
             HEIGHT2=$($NODE2_CLI getblockcount 2>/dev/null || echo "0")
-            if [ "$HEIGHT1" = "$HEIGHT2" ]; then
-                echo "✓ Nodes synchronized at height $HEIGHT1"
+                        if [ "$HEIGHT1" = "$HEIGHT2" ]; then
+                echo "✓ Both nodes synchronized at height $HEIGHT1"
                 
-                # Rescan Node 2's wallet to detect coinbase from block 2
+                # Rescan wallets to detect coinbase rewards
                 echo "Rescanning Node 2 wallet to detect coinbase rewards..."
-                $NODE2_CLI -rpcwallet=default rescanblockchain 0 >/dev/null 2>&1 || echo "Rescan failed, but continuing..."
+                $NODE2_CLI -rpcwallet=default rescanblockchain 0 >/dev/null 2>&1 || echo "Node 2 rescan failed, but continuing..."
                 sleep 2
                 break
             fi
@@ -177,5 +185,5 @@ else
         echo "Nodes are not synchronized! Node 1: $HEIGHT1, Node 2: $HEIGHT2"
         echo "The Bitcoin nodes may not be properly connected as peers."
     fi
-    echo "You may need to check node synchronization or run 'just check-peers'"
+    echo "You may need to check node synchronization or run 'just status'"
 fi

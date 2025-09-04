@@ -1,0 +1,26 @@
+# Bitcoin Network Ports
+[bitcoin.node1]
+rpc = 18332
+p2p = 18333
+datadir = "bitcoind"
+
+[bitcoin.node2] 
+rpc = 18444
+p2p = 18450
+datadir = "bitcoind2"
+
+# Nostr Relay Ports
+[nostr]
+strfry1 = 7777
+strfry2 = 7778
+
+# TX Relay Server Ports  
+[txrelay]
+server1 = 7779
+server2 = 7780
+
+# Operational settings
+[timeouts]
+bitcoin_rpc = 60
+strfry_ready = 300
+strfry_build = 600

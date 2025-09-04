@@ -1,12 +1,13 @@
 { pkgs, config, ... }:
 
 let
+  # Load centralized port configuration
+  ports = builtins.fromTOML (builtins.readFile ./config/ports.toml);
+  
   bitcoind = pkgs.bitcoind;
   bitcoinCli = pkgs.bitcoin;
   initScript = "${config.devenv.root}/scripts/init-wallets.sh";
-  datadir = "${config.devenv.root}/.devenv/state/bitcoind";
-  bitcoinConf1 = ./config/bitcoin1.conf;
-  bitcoinConf2 = ./config/bitcoin2.conf;
+  bitcoinBaseConf = ./config/bitcoin-base.conf;
 in
 {
   packages = [
@@ -16,6 +17,7 @@ in
     pkgs.pkg-config
     pkgs.curl
     pkgs.jq
+    pkgs.yq-go
     pkgs.go
     pkgs.netcat
     pkgs.python3
@@ -37,18 +39,30 @@ in
 
   processes.bitcoind1.exec = ''
     mkdir -p ${config.devenv.root}/logs
-    mkdir -p ${datadir}
+    mkdir -p ${config.devenv.root}/.devenv/state/${ports.bitcoin.node1.datadir}
     exec > >(tee -a ${config.devenv.root}/logs/bitcoind1.log)
     exec 2>&1
     
     echo "[$(date)] bitcoind: Starting bitcoind..."
-    ${bitcoind}/bin/bitcoind -datadir=${datadir} -conf=${bitcoinConf1} -regtest -port=18333 -rpcport=18443 &
+    ${bitcoind}/bin/bitcoind \
+      -datadir=${config.devenv.root}/.devenv/state/${ports.bitcoin.node1.datadir} \
+      -conf=${bitcoinBaseConf} \
+      -regtest \
+      -port=${toString ports.bitcoin.node1.p2p} \
+      -rpcport=${toString ports.bitcoin.node1.rpc} &
     pid=$!
 
     echo "[$(date)] bitcoind: Waiting for bitcoind RPC..."
     timeout=60
     counter=0
-    until ${bitcoinCli}/bin/bitcoin-cli -datadir=${datadir} -conf=${bitcoinConf1} -regtest -rpcuser=user -rpcpassword=password getblockchaininfo >/dev/null 2>&1; do
+    until ${bitcoinCli}/bin/bitcoin-cli \
+      -datadir=${config.devenv.root}/.devenv/state/${ports.bitcoin.node1.datadir} \
+      -conf=${bitcoinBaseConf} \
+      -regtest \
+      -rpcuser=user \
+      -rpcpassword=password \
+      -rpcport=${toString ports.bitcoin.node1.rpc} \
+      getblockchaininfo >/dev/null 2>&1; do
       sleep 1
       counter=$((counter + 1))
       if [ $counter -ge $timeout ]; then
@@ -66,25 +80,44 @@ in
     # Connect to bitcoind2 once both are running
     echo "[$(date)] bitcoind: Connecting to peer bitcoind2..."
     sleep 2
-    ${bitcoinCli}/bin/bitcoin-cli -datadir=${datadir} -conf=${bitcoinConf1} -regtest -rpcuser=user -rpcpassword=password addnode "127.0.0.1:18445" "add" || true
+    ${bitcoinCli}/bin/bitcoin-cli \
+      -datadir=${config.devenv.root}/.devenv/state/${ports.bitcoin.node1.datadir} \
+      -conf=${bitcoinBaseConf} \
+      -regtest \
+      -rpcuser=user \
+      -rpcpassword=password \
+      -rpcport=${toString ports.bitcoin.node1.rpc} \
+      addnode "127.0.0.1:${toString ports.bitcoin.node2.p2p}" "add" || true
 
     wait $pid
   '';
 
   processes.bitcoind2.exec = ''
     mkdir -p ${config.devenv.root}/logs
-    mkdir -p ${config.devenv.root}/.devenv/state/bitcoind2
+    mkdir -p ${config.devenv.root}/.devenv/state/${ports.bitcoin.node2.datadir}
     exec > >(tee -a ${config.devenv.root}/logs/bitcoind2.log)
     exec 2>&1
     
-    echo "[$(date)] bitcoind2: Starting second bitcoind on port 18444..."
-    ${bitcoind}/bin/bitcoind -datadir=${config.devenv.root}/.devenv/state/bitcoind2 -conf=${bitcoinConf2} -regtest -port=18445 -rpcport=18444 &
+    echo "[$(date)] bitcoind2: Starting second bitcoind on port ${toString ports.bitcoin.node2.p2p}..."
+    ${bitcoind}/bin/bitcoind \
+      -datadir=${config.devenv.root}/.devenv/state/${ports.bitcoin.node2.datadir} \
+      -conf=${bitcoinBaseConf} \
+      -regtest \
+      -port=${toString ports.bitcoin.node2.p2p} \
+      -rpcport=${toString ports.bitcoin.node2.rpc} &
     pid=$!
 
     echo "[$(date)] bitcoind2: Waiting for bitcoind RPC..."
     timeout=60
     counter=0
-    until ${bitcoinCli}/bin/bitcoin-cli -datadir=${config.devenv.root}/.devenv/state/bitcoind2 -conf=${bitcoinConf2} -regtest -rpcuser=user -rpcpassword=password -rpcport=18444 getblockchaininfo >/dev/null 2>&1; do
+    until ${bitcoinCli}/bin/bitcoin-cli \
+      -datadir=${config.devenv.root}/.devenv/state/${ports.bitcoin.node2.datadir} \
+      -conf=${bitcoinBaseConf} \
+      -regtest \
+      -rpcuser=user \
+      -rpcpassword=password \
+      -rpcport=${toString ports.bitcoin.node2.rpc} \
+      getblockchaininfo >/dev/null 2>&1; do
       sleep 1
       counter=$((counter + 1))
       if [ $counter -ge $timeout ]; then
@@ -102,10 +135,18 @@ in
     # Connect to bitcoind1 to form network
     echo "[$(date)] bitcoind2: Connecting to peer bitcoind1..."
     sleep 2
-    ${bitcoinCli}/bin/bitcoin-cli -datadir=${config.devenv.root}/.devenv/state/bitcoind2 -conf=${bitcoinConf2} -regtest -rpcuser=user -rpcpassword=password -rpcport=18444 addnode "127.0.0.1:18333" "add" || true
+    ${bitcoinCli}/bin/bitcoin-cli \
+      -datadir=${config.devenv.root}/.devenv/state/${ports.bitcoin.node2.datadir} \
+      -conf=${bitcoinBaseConf} \
+      -regtest \
+      -rpcuser=user \
+      -rpcpassword=password \
+      -rpcport=${toString ports.bitcoin.node2.rpc} \
+      addnode "127.0.0.1:${toString ports.bitcoin.node1.p2p}" "add" || true
 
     wait $pid
   '';
+
 
   processes.stirfry.exec = ''
     mkdir -p ${config.devenv.root}/logs
@@ -158,13 +199,85 @@ in
     if [ ! -f strfry.conf ]; then
       echo "[$(date)] strfry: Creating strfry config..."
       cp strfry-src/strfry.conf ./strfry.conf
+      # Enable verbose logging to see event relay activity
+      sed -i 's/dumpInAll = false/dumpInAll = true/' strfry.conf
+      sed -i 's/dumpInEvents = false/dumpInEvents = true/' strfry.conf
     fi
     
     # Create database directory if it doesn't exist
     mkdir -p strfry-db
     
-    echo "[$(date)] strfry: Starting strfry relay on port 7777..."
+    echo "[$(date)] strfry: Starting strfry relay on port ${toString ports.nostr.strfry1}..."
     ./strfry --config=strfry.conf relay
+  '';
+
+  processes.strfry2.exec = ''
+    mkdir -p ${config.devenv.root}/logs
+    mkdir -p ${config.devenv.root}/.devenv/state/strfry2
+    cd ${config.devenv.root}/.devenv/state/strfry2
+    exec > >(tee -a ${config.devenv.root}/logs/strfry2.log)
+    exec 2>&1
+    
+    if [ ! -f strfry ]; then
+      echo "[$(date)] strfry2: Waiting for strfry1 to build binary..."
+      # Wait for strfry1 to build and be ready
+      timeout=600  # 10 minutes timeout
+      counter=0
+      until [ -f ${config.devenv.root}/.devenv/state/stirfry/strfry ]; do
+        sleep 2
+        counter=$((counter + 2))
+        if [ $counter -ge $timeout ]; then
+          echo "[$(date)] strfry2: ERROR: Timeout waiting for strfry1 binary after $timeout seconds"
+          exit 1
+        fi
+        if [ $((counter % 30)) -eq 0 ]; then
+          echo "[$(date)] strfry2: Still waiting for strfry1 binary... ($counter/$timeout seconds)"
+        fi
+      done
+      
+      echo "[$(date)] strfry2: Copying strfry binary from strfry1..."
+      cp ${config.devenv.root}/.devenv/state/stirfry/strfry ./strfry
+      chmod +x ./strfry
+      echo "[$(date)] strfry2: ✓ strfry binary copied successfully"
+      
+      # Also copy the config file template
+      if [ -f ${config.devenv.root}/.devenv/state/stirfry/strfry-src/strfry.conf ]; then
+        cp ${config.devenv.root}/.devenv/state/stirfry/strfry-src/strfry.conf ./strfry.conf.template
+      fi
+    fi
+    
+    if [ ! -f strfry.conf ]; then
+      echo "[$(date)] strfry2: Creating strfry config for port ${toString ports.nostr.strfry2}..."
+      if [ -f ./strfry.conf.template ]; then
+        cp ./strfry.conf.template ./strfry.conf
+      else
+        # Fallback: copy from strfry1
+        cp ${config.devenv.root}/.devenv/state/stirfry/strfry-src/strfry.conf ./strfry.conf
+      fi
+      # Update port to 7778
+      sed -i 's/port = ${toString ports.nostr.strfry1}/port = ${toString ports.nostr.strfry2}/' strfry.conf
+      # Enable verbose logging to see event relay activity
+      sed -i 's/dumpInAll = false/dumpInAll = true/' strfry.conf
+      sed -i 's/dumpInEvents = false/dumpInEvents = true/' strfry.conf
+    fi
+    
+    # Create database directory if it doesn't exist
+    mkdir -p strfry-db
+    
+    echo "[$(date)] strfry2: Starting strfry relay on port ${toString ports.nostr.strfry2}..."
+    ./strfry --config=strfry.conf relay &
+    STRFRY_PID=$!
+    
+    # Wait for strfry2 to start
+    sleep 5
+    
+    # Start federation stream to strfry1
+    echo "[$(date)] strfry2: Starting federation stream to strfry1..."
+    ./strfry stream ws://127.0.0.1:${toString ports.nostr.strfry1} --dir both &
+    STREAM_PID=$!
+    
+    # Wait for both processes
+    wait $STRFRY_PID $STREAM_PID
   '';
 
   processes.tx-relay-1.exec = ''
@@ -177,7 +290,14 @@ in
     echo "[$(date)] tx-relay-1: Waiting for bitcoind1 RPC..."
     timeout=120
     counter=0
-    until bitcoin-cli -datadir=${datadir} -conf=${bitcoinConf1} -regtest -rpcuser=user -rpcpassword=password getblockchaininfo >/dev/null 2>&1; do
+    until bitcoin-cli \
+      -datadir=${config.devenv.root}/.devenv/state/${ports.bitcoin.node1.datadir} \
+      -conf=${bitcoinBaseConf} \
+      -regtest \
+      -rpcuser=user \
+      -rpcpassword=password \
+      -rpcport=${toString ports.bitcoin.node1.rpc} \
+      getblockchaininfo >/dev/null 2>&1; do
       sleep 1
       counter=$((counter + 1))
       if [ $counter -ge $timeout ]; then
@@ -193,7 +313,7 @@ in
     echo "[$(date)] tx-relay-1: Waiting for strfry relay..."
     counter=0
     timeout=180
-    until nc -z 127.0.0.1 7777 >/dev/null 2>&1; do
+    until nc -z 127.0.0.1 ${toString ports.nostr.strfry1} >/dev/null 2>&1; do
       sleep 1
       counter=$((counter + 1))
       if [ $counter -ge $timeout ]; then
@@ -208,7 +328,14 @@ in
     
     # Auto-initialize wallets if needed
     echo "[$(date)] tx-relay-1: Checking if wallet initialization is needed..."
-    HEIGHT=$(bitcoin-cli -datadir=${datadir} -conf=${bitcoinConf1} -regtest -rpcuser=user -rpcpassword=password getblockcount 2>/dev/null || echo "0")
+    HEIGHT=$(bitcoin-cli \
+      -datadir=${config.devenv.root}/.devenv/state/${ports.bitcoin.node1.datadir} \
+      -conf=${bitcoinBaseConf} \
+      -regtest \
+      -rpcuser=user \
+      -rpcpassword=password \
+      -rpcport=${toString ports.bitcoin.node1.rpc} \
+      getblockcount 2>/dev/null || echo "0")
     if [ "$HEIGHT" -lt 102 ]; then
       echo "[$(date)] tx-relay-1: Block height is $HEIGHT, auto-initializing wallets..."
       ${initScript} || echo "[$(date)] tx-relay-1: Warning: Init script failed but continuing..."
@@ -218,7 +345,7 @@ in
     
     echo "[$(date)] tx-relay-1: Starting Bitcoin Transaction Relay Server 1..."
     cd ${config.devenv.root}
-    cargo run --bin tx-relay-server 1 7779 18443
+    cargo run --bin tx-relay-server 1 ${toString ports.txrelay.server1} ${toString ports.bitcoin.node1.rpc} ${toString ports.nostr.strfry1}
   '';
 
   processes.tx-relay-2.exec = ''
@@ -231,7 +358,14 @@ in
     echo "[$(date)] tx-relay-2: Waiting for bitcoind2 RPC..."
     timeout=120
     counter=0
-    until bitcoin-cli -datadir=${config.devenv.root}/.devenv/state/bitcoind2 -conf=${bitcoinConf2} -regtest -rpcuser=user -rpcpassword=password -rpcport=18444 getblockchaininfo >/dev/null 2>&1; do
+    until bitcoin-cli \
+      -datadir=${config.devenv.root}/.devenv/state/${ports.bitcoin.node2.datadir} \
+      -conf=${bitcoinBaseConf} \
+      -regtest \
+      -rpcuser=user \
+      -rpcpassword=password \
+      -rpcport=${toString ports.bitcoin.node2.rpc} \
+      getblockchaininfo >/dev/null 2>&1; do
       sleep 1
       counter=$((counter + 1))
       if [ $counter -ge $timeout ]; then
@@ -244,25 +378,32 @@ in
     done
     echo "[$(date)] tx-relay-2: ✓ bitcoind2 RPC ready"
     
-    echo "[$(date)] tx-relay-2: Waiting for strfry relay..."
+    echo "[$(date)] tx-relay-2: Waiting for strfry2 relay..."
     counter=0
-    timeout=180
-    until nc -z 127.0.0.1 7777 >/dev/null 2>&1; do
+    timeout=300
+    until nc -z 127.0.0.1 ${toString ports.nostr.strfry2} >/dev/null 2>&1; do
       sleep 1
       counter=$((counter + 1))
       if [ $counter -ge $timeout ]; then
-        echo "[$(date)] tx-relay-2: ERROR: Timeout waiting for strfry relay after $timeout seconds"
+        echo "[$(date)] tx-relay-2: ERROR: Timeout waiting for strfry2 relay after $timeout seconds"
         exit 1
       fi
       if [ $((counter % 30)) -eq 0 ]; then
-        echo "[$(date)] tx-relay-2: Still waiting for strfry relay... ($counter/$timeout seconds)"
+        echo "[$(date)] tx-relay-2: Still waiting for strfry2 relay... ($counter/$timeout seconds)"
       fi
     done
-    echo "[$(date)] tx-relay-2: ✓ strfry relay ready"
+    echo "[$(date)] tx-relay-2: ✓ strfry2 relay ready"
     
     # Auto-initialize wallets if needed (check from Node 2's perspective)
     echo "[$(date)] tx-relay-2: Checking if wallet initialization is needed..."
-    HEIGHT=$(bitcoin-cli -datadir=${config.devenv.root}/.devenv/state/bitcoind2 -conf=${bitcoinConf2} -regtest -rpcuser=user -rpcpassword=password -rpcport=18444 getblockcount 2>/dev/null || echo "0")
+    HEIGHT=$(bitcoin-cli \
+      -datadir=${config.devenv.root}/.devenv/state/${ports.bitcoin.node2.datadir} \
+      -conf=${bitcoinBaseConf} \
+      -regtest \
+      -rpcuser=user \
+      -rpcpassword=password \
+      -rpcport=${toString ports.bitcoin.node2.rpc} \
+      getblockcount 2>/dev/null || echo "0")
     if [ "$HEIGHT" -lt 102 ]; then
       echo "[$(date)] tx-relay-2: Block height is $HEIGHT, auto-initialization should be handled by tx-relay-1"
     else
@@ -271,14 +412,15 @@ in
     
     echo "[$(date)] tx-relay-2: Starting Bitcoin Transaction Relay Server 2..."
     cd ${config.devenv.root}
-    cargo run --bin tx-relay-server 2 7780 18444
+    cargo run --bin tx-relay-server 2 ${toString ports.txrelay.server2} ${toString ports.bitcoin.node2.rpc} ${toString ports.nostr.strfry2}
   '';
 
 
+
   enterShell = ''
-    alias bitcoin-cli='bitcoin-cli -datadir=${datadir} -conf=${bitcoinConf1} -regtest'
-    echo "Bitcoin Core (regtest, blocks-only) running at: 127.0.0.1:18443"
-    echo "Strfry nostr relay running at: ws://127.0.0.1:7777"
+    echo "🚀 TxRelay Development Environment"
+    echo ""
+    just --list 2>/dev/null || echo "Run 'just' to see available commands (installing...)"
   '';
 }
 
