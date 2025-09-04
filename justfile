@@ -355,7 +355,10 @@ balance node="all":
         fi
         
         BALANCE=$($CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default getbalance)
+        UTXO_COUNT=$($CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default listunspent 1 2>/dev/null | jq length 2>/dev/null || echo "0")
+        
         echo "Spendable balance: $BALANCE BTC"
+        echo "Available UTXOs: $UTXO_COUNT"
         
         # Show detailed balance breakdown if available
         $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default getbalances 2>/dev/null && echo "" || true
@@ -376,14 +379,18 @@ balance node="all":
 
 
 
+
 # Clean data (options: all, logs, nostr, btc)
 clean type="all":
     #!/usr/bin/env bash
     case "{{type}}" in
         "all")
-            echo "Cleaning all data..."
-            rm -rf .devenv/state/bitcoind/* .devenv/state/bitcoind2/* .devenv/state/stirfry/* .devenv/state/strfry2/* logs/*
-            echo "✓ All data cleaned"
+            echo "Cleaning all data (preserving binaries)..."
+            rm -rf .devenv/state/bitcoind/* .devenv/state/bitcoind2/* logs/*
+            # Only remove database and logs from Nostr relays, keep binaries
+            rm -rf .devenv/state/stirfry/strfry-db/* .devenv/state/stirfry/*.log
+            rm -rf .devenv/state/strfry2/strfry-db/* .devenv/state/strfry2/*.log
+            echo "✓ All data cleaned (binaries preserved)"
             ;;
         "logs")
             echo "Cleaning logs..."
@@ -391,9 +398,11 @@ clean type="all":
             echo "✓ Logs cleaned"
             ;;
         "nostr")
-            echo "Cleaning Nostr relay data..."
-            rm -rf .devenv/state/stirfry/* .devenv/state/strfry2/*
-            echo "✓ Nostr relay data cleaned"
+            echo "Cleaning Nostr relay data (preserving binaries)..."
+            # Only remove database and logs, keep binary and source
+            rm -rf .devenv/state/stirfry/strfry-db/* .devenv/state/stirfry/*.log
+            rm -rf .devenv/state/strfry2/strfry-db/* .devenv/state/strfry2/*.log
+            echo "✓ Nostr relay data cleaned (binaries preserved)"
             ;;
         "btc")
             echo "Cleaning Bitcoin node data..."

@@ -140,7 +140,7 @@ else
         for i in {1..30}; do
             HEIGHT1=$($NODE1_CLI getblockcount 2>/dev/null || echo "0")
             HEIGHT2=$($NODE2_CLI getblockcount 2>/dev/null || echo "0")
-                        if [ "$HEIGHT1" = "$HEIGHT2" ]; then
+            if [ "$HEIGHT1" = "$HEIGHT2" ]; then
                 echo "✓ Both nodes synchronized at height $HEIGHT1"
                 
                 # Rescan wallets to detect coinbase rewards

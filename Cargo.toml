@@ -22,6 +22,7 @@ secp256k1 = "0.28"
 bitcoin = "0.30"
 anyhow = "1.0"
 thiserror = "1.0"
+lru = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 nostr = "0.25"

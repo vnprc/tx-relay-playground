@@ -631,6 +631,10 @@ impl TxRelayServer {
                     Ok(()) => {
                         info!("Relay-{}: Transaction {} passed validation", self.relay_id, txid);
                     }
+                    Err(tx_relay::validation::ValidationError::RecentlyProcessed(_)) => {
+                        info!("Relay-{}: Transaction {} recently processed (cache hit)", self.relay_id, txid);
+                        return Ok(()); // Skip recently processed transactions
+                    }
                     Err(e) => {
                         warn!("Relay-{}: Transaction {} failed validation: {}", self.relay_id, txid, e);
                         return Ok(()); // Skip invalid transactions
