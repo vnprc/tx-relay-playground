@@ -6,7 +6,8 @@ A proof-of-concept implementation demonstrating how Bitcoin transactions can be 
 
 This project implements a Bitcoin-over-Nostr mesh network where:
 
-- **Two independent Bitcoin nodes** run in blocks-only mode (no P2P transaction relay)
+- **Two independent Bitcoin nodes** run with configurable transaction relay modes
+- **Multi-chain support** for regtest and testnet4 networks
 - **Two relay servers** monitor their respective Bitcoin node mempools
 - **Transaction sharing** happens exclusively through the Nostr protocol
 - **Two Strfry relays** form a federated Nostr network (Strfry-1 ↔ Strfry-2)
@@ -44,10 +45,12 @@ When a transaction is created on Bitcoin Node 1, it gets detected by TX Relay 1,
 
 ## Features
 
-- **🚫 No P2P Transaction Relay**: Bitcoin nodes run in `blocksonly=1` mode
+- **🔧 Multi-Chain Support**: Switch between regtest and testnet4 networks
+- **🌐 Environment-Based Configuration**: Use `BITCOIN_CHAIN` env var for dynamic chain switching
 - **📡 Mempool Monitoring**: Relay servers detect new transactions every 2 seconds
 - **🌐 Nostr Broadcasting**: Transactions shared via NIP-01 ephemeral events
 - **🔄 Auto-submission**: Remote transactions automatically submitted to local Bitcoin nodes
+- **🔒 Configurable Node Modes**: Blocks-only mode for regtest, full relay for testnet4
 
 ## Quick Start
 
@@ -69,13 +72,16 @@ cd TxRelay
 just up
 ```
 
+**Or switch to a specific Bitcoin network:**
+```bash
+BITCOIN_CHAIN=testnet4 just up  # Use testnet4
+BITCOIN_CHAIN=regtest just up   # Use regtest (default)
+```
+
 This starts all services and auto-initializes wallets:
-- Bitcoin Node 1
-- Bitcoin Node 2
-- Strfry-1 Nostr Relay
-- Strfry-2 Nostr Relay
-- TX Relay Server 1
-- TX Relay Server 2
+- Bitcoin Node 1 & 2 (chain-specific ports and modes)
+- Strfry-1 & Strfry-2 Nostr Relays
+- TX Relay Server 1 & 2
 
 ### Usage
 
@@ -84,7 +90,6 @@ This starts all services and auto-initializes wallets:
 just status         # Node connectivity, sync, and peer connections
 just info           # Bitcoin blockchain info
 just balance        # Check both wallet balances
-just balance 1      # Check Node 1 wallet balance
 ```
 
 #### Create and Test Transactions
@@ -99,11 +104,11 @@ Create a transaction on Node 2:
 just create-tx 2 0.05
 ```
 
-The transaction will:
-1. 📡 Be detected by the corresponding relay server
-2. 🌐 Be broadcast to the Nostr network
-3. 🌐 Be received by the other relay server
-4. 📡 Be submitted to the other Bitcoin node
+The transaction will be:
+1. detected by the corresponding relay server
+2. broadcast to the nostr network
+3. received by the other relay server
+4. submitted to the other bitcoin node
 
 #### Monitor Transaction Flow
 
@@ -128,9 +133,11 @@ Look for these log patterns:
 | Command | Description |
 |---------|-------------|
 | `just balance 1` | Check wallet balance for a specific node (or `all` for both) |
-| `just mine 1 5` | Mine blocks to confirm transactions (node, blocks) |
+| `just address 1` | Generate new wallet address for a node |
+| `just mine 1 5` | Mine blocks to confirm transactions (node, blocks) - regtest only |
 | `just rescan 2` | Rescan wallet to rebuild UTXO set |
-| `just clean logs` | Clean data (`all`, `logs`, `nostr`, `btc`) |
+| `just clean logs` | Clean data (`logs`, `nostr`, `btc`) - preserves testnet4 by default |
+| `just clean btc testnet` | Clean ALL Bitcoin data including testnet4 |
 | `just create-tx 1 0.01` | Create transaction (default: 0.00001 BTC) |
 | `just` | List all available recipes |
 | `just info` | Get node and blockchain info |
@@ -143,10 +150,11 @@ Look for these log patterns:
 TxRelay/
 ├── src/bin/tx-relay-server.rs  # Main relay server implementation
 ├── config/
-│   ├── ports.toml              # Centralized port configuration
-│   └── bitcoin-base.conf       # Shared Bitcoin node config
-├── devenv.nix                  # Development environment
-├── justfile                    # Command recipes
+│   ├── ports.toml              # Chain-specific port configurations
+│   └── bitcoin-base.conf       # Multi-chain Bitcoin node config
+├── .env                        # Environment variables (BITCOIN_CHAIN)
+├── devenv.nix                  # Development environment with dynamic chain support
+├── justfile                    # Command recipes with chain-aware configurations
 ├── logs/                       # Service logs
 └── scripts/                    # Utility scripts
 ```
@@ -164,13 +172,15 @@ When a new transaction is found locally, the relay server:
 
 ### Remote Reception
 Other relay servers:
-1. Subscribe to transaction broadcast events from Strfry
-2. Receive the Nostr event containing transaction data
+1. Subscribe to transaction broadcast events from strfry
+2. Receive the nostr event containing transaction data
 3. Extract the raw transaction hex
 4. Submit it to their local Bitcoin node using `sendrawtransaction`
 
 ### Blocks-Only Mode
-Bitcoin nodes are configured with `blocksonly=1` to prevent normal P2P transaction relay, ensuring transactions only propagate through the Nostr network.
+In regtest, bitcoin nodes are configured with `blocksonly=1` to prevent normal P2P transaction relay, ensuring transactions only propagate through the nostr network.
+
+In testnet, one bitcoin node is configured with `blocksonly=1` so that real transactions can be broadcast to it via nostr.
 
 ## Technical Details
 
@@ -189,21 +199,48 @@ Bitcoin nodes are configured with `blocksonly=1` to prevent normal P2P transacti
 
 ## Configuration
 
-### Centralized Port Management
-All ports and data directories are configured in `config/ports.toml`. The configuration includes:
-- Bitcoin RPC/P2P ports and data directories
-- Nostr relay WebSocket ports
-- TX relay server ports
-- Operational timeouts
+### Multi-Chain Configuration
 
-The `justfile` uses `yq` to dynamically load these configurations, ensuring consistency across all services.
+#### Chain Selection
+Switch between Bitcoin networks using the `BITCOIN_CHAIN` environment variable:
+
+```bash
+# Set in .env file (persistent)
+echo "BITCOIN_CHAIN=testnet4" > .env
+
+# Or set for individual commands
+BITCOIN_CHAIN=regtest just up
+```
+
+Supported chains:
+- **regtest** (default): Local testing with instant mining
+- **testnet4**: Latest Bitcoin testnet with real network conditions  
+
+#### Chain-Specific Behavior
+- **regtest**: Both nodes run in blocks-only mode, auto-mine 102 blocks for wallet initialization
+- **testnet4**: Node 1 is blocks-only, Node 2 does full transaction relay, no auto-mining (use faucet)
+
+#### Port Configuration
+All ports and data directories are configured per-chain in `config/ports.toml`:
+
+```toml
+[bitcoin.regtest.node1]
+rpc = 18332
+p2p = 18333
+
+[bitcoin.testnet4.node1]  
+rpc = 48330
+p2p = 48340
+```
+
+The system dynamically loads chain-specific configurations using `yq`, ensuring proper port isolation between networks.
 
 ## Limitations
 
 - **Proof of Concept**: Not production-ready
 - **Federated Relays**: Relies on two Strfry instances with federation
 - **No Transaction Validation**: Blindly forwards all received transactions
-- **Regtest Only**: Designed for testing environments
+- **Chain Data Management**: testnet4 blockchain data preserved by default (use `just clean btc testnet` to remove)
 
 ## Future Work
 

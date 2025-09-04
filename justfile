@@ -3,13 +3,17 @@
 # Port configuration is centralized in config/ports.toml
 # Ports are loaded dynamically using yq
 #
-# Bitcoin Node Ports (loaded dynamically from config/ports.toml)
-NODE1_RPC := `yq eval '.bitcoin.node1.rpc' config/ports.toml`
-NODE1_P2P := `yq eval '.bitcoin.node1.p2p' config/ports.toml`
-NODE2_RPC := `yq eval '.bitcoin.node2.rpc' config/ports.toml`
-NODE2_P2P := `yq eval '.bitcoin.node2.p2p' config/ports.toml`
-NODE1_DATADIR := `yq eval '.bitcoin.node1.datadir' config/ports.toml`
-NODE2_DATADIR := `yq eval '.bitcoin.node2.datadir' config/ports.toml`
+# Bitcoin Node Ports (loaded dynamically from config/ports.toml based on chain)
+NODE1_RPC := `yq eval '.bitcoin.'${BITCOIN_CHAIN:-regtest}'.node1.rpc' config/ports.toml`
+NODE1_P2P := `yq eval '.bitcoin.'${BITCOIN_CHAIN:-regtest}'.node1.p2p' config/ports.toml`
+NODE2_RPC := `yq eval '.bitcoin.'${BITCOIN_CHAIN:-regtest}'.node2.rpc' config/ports.toml`
+NODE2_P2P := `yq eval '.bitcoin.'${BITCOIN_CHAIN:-regtest}'.node2.p2p' config/ports.toml`
+NODE1_DATADIR := `yq eval '.bitcoin.'${BITCOIN_CHAIN:-regtest}'.node1.datadir' config/ports.toml`
+NODE2_DATADIR := `yq eval '.bitcoin.'${BITCOIN_CHAIN:-regtest}'.node2.datadir' config/ports.toml`
+
+# Chain selection (regtest, testnet4, signet)
+CHAIN := env_var_or_default("BITCOIN_CHAIN", "regtest")
+CHAIN_FLAG := if CHAIN == "regtest" { "-regtest" } else if CHAIN == "testnet4" { "-testnet4" } else if CHAIN == "signet" { "-signet" } else { "" }
 
 # List all available recipes
 default:
@@ -24,6 +28,12 @@ up:
     else
         devenv up
     fi
+
+# Initialize wallets manually (auto-runs during 'just up')
+init:
+    #!/usr/bin/env bash
+    echo "Initializing Bitcoin wallets..."
+    ./scripts/init-wallets.sh
 
 
 
@@ -47,46 +57,81 @@ create-tx node="1" amount="0.00001":
     fi
     
     # Ensure wallet exists and is loaded
-    if ! $CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getwalletinfo >/dev/null 2>&1; then
-        if ! $CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT loadwallet default >/dev/null 2>&1; then
-            $CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT createwallet default >/dev/null 2>&1
+    if ! $CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getwalletinfo >/dev/null 2>&1; then
+        if ! $CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT loadwallet default >/dev/null 2>&1; then
+            $CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT createwallet default >/dev/null 2>&1
         fi
     fi
     
-    # Create and broadcast raw transaction to ensure it stays in mempool
-    ADDR=$($CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getnewaddress)
-    
-    # Get a UTXO to spend
-    UTXO=$($CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default listunspent 1 | jq -r '.[0] | "\(.txid):\(.vout):\(.amount)"')
-    if [ "$UTXO" = "null:null:null" ] || [ -z "$UTXO" ]; then
-        echo "Error: No UTXOs available in $NODE_NAME wallet"
+    # Check wallet balance first
+    BALANCE=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getbalance)
+    if [ $(echo "$BALANCE < {{amount}}" | bc -l) -eq 1 ]; then
+        echo "Error: Insufficient balance. Available: $BALANCE BTC, needed: {{amount}} BTC"
         exit 1
     fi
     
-    UTXO_TXID=$(echo $UTXO | cut -d: -f1)
-    UTXO_VOUT=$(echo $UTXO | cut -d: -f2)
-    UTXO_AMOUNT=$(echo $UTXO | cut -d: -f3)
+    # Create raw transaction to keep it in mempool for relay testing
+    ADDR=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getnewaddress)
     
-    # Calculate change amount (subtract small fee)
-    FEE="0.00001"
-    TOTAL_NEEDED=$(echo "{{amount}} + $FEE" | bc -l)
-    
-    # Check if we have enough funds
-    if [ $(echo "$UTXO_AMOUNT < $TOTAL_NEEDED" | bc -l) -eq 1 ]; then
-        echo "Error: Insufficient funds. UTXO: $UTXO_AMOUNT BTC, needed: $TOTAL_NEEDED BTC ({{amount}} + $FEE fee)"
+    # Get UTXOs for raw transaction creation
+    UTXOS=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default listunspent 1 2>&1)
+    if [ $? -ne 0 ]; then
+        echo "Error getting UTXOs: $UTXOS"
         exit 1
     fi
     
-    CHANGE=$(printf "%.8f" $(echo "$UTXO_AMOUNT - {{amount}} - $FEE" | bc -l))
+    # Find a UTXO with enough value (amount + small fee)
+    REQUIRED=$(echo "{{amount}} + 0.000002" | bc -l)
+    UTXO=$(echo "$UTXOS" | jq -r --arg req "$REQUIRED" '.[] | select(.amount >= ($req | tonumber)) | {txid, vout, amount} | @base64' | head -1)
     
-    # Create raw transaction
-    RAW_TX=$($CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT createrawtransaction "[{\"txid\":\"$UTXO_TXID\",\"vout\":$UTXO_VOUT}]" "{\"$ADDR\":{{amount}},\"$(echo $($CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getrawchangeaddress))\":$CHANGE}")
+    if [ -z "$UTXO" ]; then
+        echo "Error: No UTXO found with sufficient funds (need $REQUIRED BTC)"
+        echo "Available UTXOs:"
+        echo "$UTXOS" | jq -r '.[] | "  \(.txid):\(.vout) = \(.amount) BTC"'
+        exit 1
+    fi
+    
+    # Decode UTXO info
+    UTXO_INFO=$(echo "$UTXO" | base64 -d)
+    UTXO_TXID=$(echo "$UTXO_INFO" | jq -r '.txid')
+    UTXO_VOUT=$(echo "$UTXO_INFO" | jq -r '.vout')
+    UTXO_AMOUNT=$(echo "$UTXO_INFO" | jq -r '.amount')
+    
+    # Calculate change (input - amount - fee)
+    CHANGE=$(echo "$UTXO_AMOUNT - {{amount}} - 0.000002" | bc -l)
+    
+    # Create raw transaction with change output
+    if [ $(echo "$CHANGE > 0" | bc -l) -eq 1 ]; then
+        CHANGE_ADDR=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getnewaddress)
+        RAW_TX=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT createrawtransaction "[{\"txid\":\"$UTXO_TXID\",\"vout\":$UTXO_VOUT}]" "{\"$ADDR\":{{amount}},\"$CHANGE_ADDR\":$CHANGE}" 2>&1)
+    else
+        # No change needed
+        RAW_TX=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT createrawtransaction "[{\"txid\":\"$UTXO_TXID\",\"vout\":$UTXO_VOUT}]" "{\"$ADDR\":{{amount}}}" 2>&1)
+    fi
+    
+    if [ $? -ne 0 ]; then
+        echo "Error creating raw transaction: $RAW_TX"
+        exit 1
+    fi
     
     # Sign the transaction
-    SIGNED_TX=$($CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default signrawtransactionwithwallet $RAW_TX | jq -r '.hex')
+    SIGNED_TX=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default signrawtransactionwithwallet "$RAW_TX" 2>&1)
+    if [ $? -ne 0 ]; then
+        echo "Error signing transaction: $SIGNED_TX"
+        exit 1
+    fi
+    
+    FINAL_TX=$(echo "$SIGNED_TX" | jq -r '.hex')
+    COMPLETE=$(echo "$SIGNED_TX" | jq -r '.complete')
+    
+    if [ "$COMPLETE" != "true" ]; then
+        echo "Error: Transaction signing incomplete"
+        echo "$SIGNED_TX"
+        exit 1
+    fi
     
     # Broadcast to mempool
-    TXID=$($CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT sendrawtransaction $SIGNED_TX 2>&1)
+    TXID=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT sendrawtransaction "$FINAL_TX" 2>&1)
     
     if [ $? -eq 0 ] && [[ "$TXID" =~ ^[a-f0-9]{64}$ ]]; then
         echo "✓ Transaction $TXID created in $NODE_NAME mempool (not mined yet)"
@@ -117,25 +162,25 @@ mine node="1" blocks="1":
     fi
     
     # Ensure wallet exists and is loaded
-    if ! $CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getwalletinfo >/dev/null 2>&1; then
-        if ! $CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT loadwallet default >/dev/null 2>&1; then
-            $CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT createwallet default >/dev/null 2>&1
+    if ! $CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getwalletinfo >/dev/null 2>&1; then
+        if ! $CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT loadwallet default >/dev/null 2>&1; then
+            $CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT createwallet default >/dev/null 2>&1
         fi
     fi
     
     # Check mempool before mining
-    MEMPOOL_COUNT=$($CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT getmempoolinfo | jq -r '.size')
+    MEMPOOL_COUNT=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT getmempoolinfo | jq -r '.size')
     echo "Mining {{blocks}} block(s) with $NODE_NAME (mempool: $MEMPOOL_COUNT txs)"
     
     # Get mining address
-    ADDR=$($CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getnewaddress "mining")
+    ADDR=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getnewaddress "mining")
     
     # Mine blocks
-    BLOCK_HASHES=$($CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default generatetoaddress {{blocks}} "$ADDR")
+    BLOCK_HASHES=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default generatetoaddress {{blocks}} "$ADDR")
     
     # Show results
-    NEW_HEIGHT=$($CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT getblockcount)
-    NEW_MEMPOOL=$($CLI -datadir=$DATADIR -conf=$CONF -regtest -rpcuser=user -rpcpassword=password $RPC_PORT getmempoolinfo | jq -r '.size')
+    NEW_HEIGHT=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT getblockcount)
+    NEW_MEMPOOL=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT getmempoolinfo | jq -r '.size')
     
     echo "✓ Mined {{blocks}} block(s) to height $NEW_HEIGHT (mempool now: $NEW_MEMPOOL txs)"
     if [ {{blocks}} -eq 1 ]; then
@@ -148,7 +193,7 @@ info:
     #!/usr/bin/env bash
     CLI="/nix/store/m2ds8wlwzbljnmw4kasaqn6578a4g7n1-devenv-profile/bin/bitcoin-cli"
     echo "=== Bitcoin Node 1 Blockchain Info ==="
-    BLOCKCHAIN_INFO=$($CLI -datadir=$PWD/.devenv/state/{{NODE1_DATADIR}} -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport={{NODE1_RPC}} getblockchaininfo 2>/dev/null)
+    BLOCKCHAIN_INFO=$($CLI -datadir=$PWD/.devenv/state/{{NODE1_DATADIR}} -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport={{NODE1_RPC}} getblockchaininfo 2>/dev/null)
     if [ $? -eq 0 ]; then
         BLOCKS=$(echo "$BLOCKCHAIN_INFO" | jq -r '.blocks')
         BEST_HASH=$(echo "$BLOCKCHAIN_INFO" | jq -r '.bestblockhash')
@@ -161,7 +206,7 @@ info:
         echo "Difficulty: $DIFFICULTY"
         
         # Get the latest block info
-        LATEST_BLOCK=$($CLI -datadir=$PWD/.devenv/state/{{NODE1_DATADIR}} -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport={{NODE1_RPC}} getblock "$BEST_HASH" 2>/dev/null)
+        LATEST_BLOCK=$($CLI -datadir=$PWD/.devenv/state/{{NODE1_DATADIR}} -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport={{NODE1_RPC}} getblock "$BEST_HASH" 2>/dev/null)
         if [ $? -eq 0 ]; then
             TIMESTAMP=$(echo "$LATEST_BLOCK" | jq -r '.time')
             TX_COUNT=$(echo "$LATEST_BLOCK" | jq -r '.nTx')
@@ -200,14 +245,14 @@ status:
     echo "🟡 Bitcoin Nodes"
     
     # Node 1
-    NODE1_INFO=$($CLI -datadir=$PWD/.devenv/state/{{NODE1_DATADIR}} -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport={{NODE1_RPC}} getnetworkinfo 2>/dev/null)
+    NODE1_INFO=$($CLI -datadir=$PWD/.devenv/state/{{NODE1_DATADIR}} -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport={{NODE1_RPC}} getnetworkinfo 2>/dev/null)
     if [ $? -eq 0 ]; then
-        HEIGHT1=$($CLI -datadir=$PWD/.devenv/state/{{NODE1_DATADIR}} -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport={{NODE1_RPC}} getblockcount)
+        HEIGHT1=$($CLI -datadir=$PWD/.devenv/state/{{NODE1_DATADIR}} -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport={{NODE1_RPC}} getblockcount)
         echo "  Bitcoin Node 1 - Height: $HEIGHT1"
         echo "    TX-Relay-1 RPC (18332)"
         
         # Check if Node 2 P2P connection exists
-        PEERS1=$($CLI -datadir=$PWD/.devenv/state/{{NODE1_DATADIR}} -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport={{NODE1_RPC}} getpeerinfo | jq -r '.[].addr')
+        PEERS1=$($CLI -datadir=$PWD/.devenv/state/{{NODE1_DATADIR}} -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport={{NODE1_RPC}} getpeerinfo | jq -r '.[].addr')
         if [[ "$PEERS1" == *":{{NODE2_P2P}}"* ]]; then
             echo "    Bitcoin Node 2 P2P ({{NODE2_P2P}})"
         else
@@ -219,14 +264,14 @@ status:
     fi
     
     # Node 2  
-    NODE2_INFO=$($CLI -datadir=$PWD/.devenv/state/{{NODE2_DATADIR}} -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport={{NODE2_RPC}} getnetworkinfo 2>/dev/null)
+    NODE2_INFO=$($CLI -datadir=$PWD/.devenv/state/{{NODE2_DATADIR}} -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport={{NODE2_RPC}} getnetworkinfo 2>/dev/null)
     if [ $? -eq 0 ]; then
-        HEIGHT2=$($CLI -datadir=$PWD/.devenv/state/{{NODE2_DATADIR}} -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport={{NODE2_RPC}} getblockcount)
+        HEIGHT2=$($CLI -datadir=$PWD/.devenv/state/{{NODE2_DATADIR}} -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport={{NODE2_RPC}} getblockcount)
         echo "  Bitcoin Node 2 - Height: $HEIGHT2"
         echo "    TX-Relay-2 RPC (18444)"
         
         # Check if Node 1 P2P connection exists
-        PEERS2=$($CLI -datadir=$PWD/.devenv/state/{{NODE2_DATADIR}} -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport={{NODE2_RPC}} getpeerinfo | jq -r '.[].addr')
+        PEERS2=$($CLI -datadir=$PWD/.devenv/state/{{NODE2_DATADIR}} -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport={{NODE2_RPC}} getpeerinfo | jq -r '.[].addr')
         if [[ "$PEERS2" == *":{{NODE1_P2P}}"* ]]; then
             echo "    Bitcoin Node 1 P2P ({{NODE1_P2P}})"
         else
@@ -298,22 +343,22 @@ rescan node="all":
         
         echo "=== Rescanning $node_name Wallet ==="
         # Ensure wallet is loaded
-        if ! $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default getwalletinfo >/dev/null 2>&1; then
+        if ! $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default getwalletinfo >/dev/null 2>&1; then
             echo "Loading wallet..."
-            $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port loadwallet default >/dev/null 2>&1 || {
+            $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport=$rpc_port loadwallet default >/dev/null 2>&1 || {
                 echo "Error: No wallet found for $node_name"
                 return 1
             }
         fi
         
         echo "Rescanning blockchain for $node_name..."
-        $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default rescanblockchain 0 >/dev/null 2>&1
+        $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default rescanblockchain 0 >/dev/null 2>&1
         
         if [ $? -eq 0 ]; then
             echo "✓ $node_name wallet rescan completed"
             # Show updated balance
-            BALANCE=$($CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default getbalance)
-            UTXO_COUNT=$($CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default listunspent | jq length)
+            BALANCE=$($CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default getbalance)
+            UTXO_COUNT=$($CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default listunspent | jq length)
             echo "Balance: $BALANCE BTC, UTXOs: $UTXO_COUNT"
         else
             echo "✗ $node_name wallet rescan failed"
@@ -346,22 +391,22 @@ balance node="all":
         
         echo "=== $node_name Wallet Balance ==="
         # Try to load wallet if it's not loaded
-        if ! $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default getwalletinfo >/dev/null 2>&1; then
+        if ! $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default getwalletinfo >/dev/null 2>&1; then
             echo "Loading wallet..."
-            $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port loadwallet default >/dev/null 2>&1 || {
+            $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport=$rpc_port loadwallet default >/dev/null 2>&1 || {
                 echo "Error: No wallet found. Run 'just init' to create wallets."
                 return 1
             }
         fi
         
-        BALANCE=$($CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default getbalance)
-        UTXO_COUNT=$($CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default listunspent 1 2>/dev/null | jq length 2>/dev/null || echo "0")
+        BALANCE=$($CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default getbalance)
+        UTXO_COUNT=$($CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default listunspent 1 2>/dev/null | jq length 2>/dev/null || echo "0")
         
         echo "Spendable balance: $BALANCE BTC"
         echo "Available UTXOs: $UTXO_COUNT"
         
         # Show detailed balance breakdown if available
-        $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf -regtest -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default getbalances 2>/dev/null && echo "" || true
+        $CLI -datadir=$datadir -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport=$rpc_port -rpcwallet=default getbalances 2>/dev/null && echo "" || true
         echo ""
     }
     
@@ -385,12 +430,15 @@ clean type="all":
     #!/usr/bin/env bash
     case "{{type}}" in
         "all")
-            echo "Cleaning all data (preserving binaries)..."
-            rm -rf .devenv/state/bitcoind/* .devenv/state/bitcoind2/* logs/*
+            echo "Cleaning all data (preserving binaries and testnet4 blocks)..."
+            # Clean regtest/signet Bitcoin data only, preserve testnet4
+            rm -rf .devenv/state/bitcoind/regtest .devenv/state/bitcoind2/regtest
+            rm -rf .devenv/state/bitcoind/signet .devenv/state/bitcoind2/signet
+            rm -rf logs/*
             # Only remove database and logs from Nostr relays, keep binaries
             rm -rf .devenv/state/stirfry/strfry-db/* .devenv/state/stirfry/*.log
             rm -rf .devenv/state/strfry2/strfry-db/* .devenv/state/strfry2/*.log
-            echo "✓ All data cleaned (binaries preserved)"
+            echo "✓ All data cleaned (binaries and testnet4 blocks preserved)"
             ;;
         "logs")
             echo "Cleaning logs..."
@@ -405,14 +453,52 @@ clean type="all":
             echo "✓ Nostr relay data cleaned (binaries preserved)"
             ;;
         "btc")
-            echo "Cleaning Bitcoin node data..."
+            echo "Cleaning Bitcoin node data (regtest/signet only, preserving testnet4)..."
+            # Only clean regtest/signet data directories, preserve testnet4
+            rm -rf .devenv/state/bitcoind/regtest .devenv/state/bitcoind2/regtest
+            rm -rf .devenv/state/bitcoind/signet .devenv/state/bitcoind2/signet
+            echo "✓ Bitcoin regtest/signet data cleaned (testnet4 preserved)"
+            ;;
+        "btc testnet")
+            echo "Cleaning ALL Bitcoin node data including testnet4..."
             rm -rf .devenv/state/bitcoind/* .devenv/state/bitcoind2/*
-            echo "✓ Bitcoin node data cleaned"
+            echo "✓ All Bitcoin node data cleaned (including testnet4)"
             ;;
         *)
-            echo "Error: type must be 'all', 'logs', 'nostr', or 'btc'"
+            echo "Error: type must be 'all', 'logs', 'nostr', 'btc', or 'btc testnet'"
             exit 1
             ;;
     esac
+
+# Generate a new wallet address (default: node 1)
+address node="1":
+    #!/usr/bin/env bash
+    CLI="/nix/store/m2ds8wlwzbljnmw4kasaqn6578a4g7n1-devenv-profile/bin/bitcoin-cli"
+    if [ "{{node}}" = "1" ]; then
+        DATADIR="$PWD/.devenv/state/{{NODE1_DATADIR}}"
+        CONF="$PWD/config/bitcoin-base.conf"
+        RPC_PORT="-rpcport={{NODE1_RPC}}"
+        NODE_NAME="Node 1"
+    elif [ "{{node}}" = "2" ]; then
+        DATADIR="$PWD/.devenv/state/{{NODE2_DATADIR}}"
+        CONF="$PWD/config/bitcoin-base.conf"
+        RPC_PORT="-rpcport={{NODE2_RPC}}"
+        NODE_NAME="Node 2"
+    else
+        echo "Error: node must be 1 or 2"
+        exit 1
+    fi
+    
+    # Ensure wallet exists and is loaded
+    if ! $CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getwalletinfo >/dev/null 2>&1; then
+        if ! $CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT loadwallet default >/dev/null 2>&1; then
+            $CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT createwallet default >/dev/null 2>&1
+        fi
+    fi
+    
+    # Generate new address
+    ADDR=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getnewaddress "receive")
+    echo "Generated new address for $NODE_NAME ({{CHAIN}}):"
+    echo "$ADDR"
 
 

@@ -314,8 +314,6 @@ impl TxRelayServer {
     }
     
     async fn broadcast_transaction(&self, tx: &Transaction, txid: &str) -> Result<()> {
-        info!("Broadcasting transaction {} to strfry relay", txid);
-        
         let content = json!({
             "txid": txid,
             "size": bitcoin::consensus::serialize(tx).len(),
@@ -340,7 +338,7 @@ impl TxRelayServer {
         
         // Send to strfry relay
         match self.send_to_strfry(&event).await {
-            Ok(_) => info!("Relay-{}: Successfully broadcast transaction {} to strfry", self.relay_id, txid),
+            Ok(_) => info!("📡 Relay-{}: Broadcasting transaction {} via Nostr", self.relay_id, txid),
             Err(e) => error!("Relay-{}: Failed to broadcast transaction {} to strfry: {}", self.relay_id, txid, e),
         }
         
@@ -387,8 +385,6 @@ impl TxRelayServer {
                 Ok(current_txids) => {
                     for txid in &current_txids {
                         if !known_txids.contains(txid) {
-                            info!("Relay-{}: New transaction in mempool: {}", self.relay_id, txid);
-                            
                             // Check if this transaction was received from a remote relay
                             let is_remote = {
                                 let remote_txs = self.remote_transactions.read().await;
@@ -401,14 +397,11 @@ impl TxRelayServer {
                                     if let Ok(tx) = bitcoin::consensus::deserialize::<bitcoin::Transaction>(
                                         &hex::decode(&raw_tx)?
                                     ) {
-                                        info!("📡 Relay-{}: Found transaction {} in LOCAL mempool", self.relay_id, txid);
                                         if let Err(e) = self.broadcast_transaction(&tx, txid).await {
                                             error!("Relay-{}: Failed to broadcast transaction {}: {}", self.relay_id, txid, e);
                                         }
                                     }
                                 }
-                            } else {
-                                info!("Relay-{}: Skipping broadcast of remote transaction {} (already received via Nostr)", self.relay_id, txid);
                             }
                             
                             known_txids.insert(txid.clone());
@@ -585,13 +578,17 @@ impl TxRelayServer {
                 let event: Event = serde_json::from_value(arr[2].clone())?;
                 
                 if event.kind.as_u32() == KIND_TX_BROADCAST as u32 {
-                    info!("🌐 Relay-{}: Received transaction broadcast event via Nostr", self.relay_id);
                     self.handle_remote_transaction(event).await?;
                 } else {
                     info!("Relay-{}: Received non-transaction event (kind: {})", self.relay_id, event.kind.as_u32());
                 }
             } else {
-                info!("Relay-{}: Received non-EVENT message from strfry: {:?}", self.relay_id, arr.get(0));
+                // Handle non-EVENT messages (OK, EOSE, etc.) silently unless error
+                if let Some(msg_type) = arr.get(0).and_then(|v| v.as_str()) {
+                    if msg_type != "OK" && msg_type != "EOSE" {
+                        error!("Relay-{}: Unexpected message from strfry: {:?}", self.relay_id, arr.get(0));
+                    }
+                }
             }
         }
         
@@ -618,21 +615,15 @@ impl TxRelayServer {
         
         if let Some(tx_hex) = tx_data.get("hex").and_then(|h| h.as_str()) {
             if let Some(txid) = tx_data.get("txid").and_then(|t| t.as_str()) {
-                info!("🌐 Relay-{}: Received transaction {} via NOSTR from another relay", self.relay_id, txid);
-                
-                // Track this transaction as received from remote BEFORE submitting to avoid rebroadcasting
-                {
-                    let mut remote_txs = self.remote_transactions.write().await;
-                    remote_txs.insert(txid.to_string());
-                }
+                let mut remote_txs = self.remote_transactions.write().await;
+                remote_txs.insert(txid.to_string());
                 
                 // Validate transaction before submitting
                 match self.validator.validate(tx_hex).await {
                     Ok(()) => {
-                        info!("Relay-{}: Transaction {} passed validation", self.relay_id, txid);
+                        // Validation passed, continue to submission
                     }
                     Err(tx_relay::validation::ValidationError::RecentlyProcessed(_)) => {
-                        info!("Relay-{}: Transaction {} recently processed (cache hit)", self.relay_id, txid);
                         return Ok(()); // Skip recently processed transactions
                     }
                     Err(e) => {
@@ -644,12 +635,12 @@ impl TxRelayServer {
                 // Submit the validated transaction to our local Bitcoin node
                 match self.submit_to_bitcoin_node(tx_hex).await {
                     Ok(_) => {
-                        info!("Relay-{}: Successfully submitted remote transaction {} to local Bitcoin node", self.relay_id, txid);
+                        info!("🌐 Relay-{}: Received transaction {} via Nostr", self.relay_id, txid);
                     }
                     Err(e) => {
                         // Don't log as error if transaction already exists
                         if e.to_string().contains("already in mempool") || e.to_string().contains("already exists") {
-                            info!("Relay-{}: Transaction {} already in local mempool", self.relay_id, txid);
+                            // Transaction already exists, no need to log
                         } else {
                             warn!("Relay-{}: Failed to submit remote transaction {} to local Bitcoin node: {}", self.relay_id, txid, e);
                         }
