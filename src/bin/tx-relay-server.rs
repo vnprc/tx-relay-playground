@@ -12,6 +12,8 @@ use tokio_tungstenite::{accept_async, connect_async, tungstenite::protocol::Mess
 use tracing::{error, info, warn};
 use url::Url;
 
+use tx_relay::validation::{TransactionValidator, ValidationConfig};
+
 // Bitcoin RPC client module
 mod bitcoin_rpc {
     use anyhow::{anyhow, Result};
@@ -61,6 +63,8 @@ pub struct TxRelayServer {
     strfry_port: u16,
     // Track transactions received from remote relays to avoid rebroadcasting
     remote_transactions: Arc<RwLock<HashSet<String>>>,
+    // Transaction validator
+    validator: TransactionValidator,
 }
 
 impl TxRelayServer {
@@ -75,6 +79,10 @@ impl TxRelayServer {
         let (tx_broadcaster, _) = broadcast::channel(1000);
         let (strfry_sender, strfry_receiver) = mpsc::unbounded_channel();
         
+        // Initialize transaction validator with default configuration
+        let validation_config = ValidationConfig::default();
+        let validator = TransactionValidator::new(validation_config, bitcoin_port);
+        
         Self {
             bitcoin_client,
             clients: Arc::new(RwLock::new(HashMap::new())),
@@ -86,6 +94,7 @@ impl TxRelayServer {
             bitcoin_port,
             strfry_port,
             remote_transactions: Arc::new(RwLock::new(HashSet::new())),
+            validator,
         }
     }
     
@@ -617,7 +626,18 @@ impl TxRelayServer {
                     remote_txs.insert(txid.to_string());
                 }
                 
-                // Submit the transaction to our local Bitcoin node
+                // Validate transaction before submitting
+                match self.validator.validate(tx_hex).await {
+                    Ok(()) => {
+                        info!("Relay-{}: Transaction {} passed validation", self.relay_id, txid);
+                    }
+                    Err(e) => {
+                        warn!("Relay-{}: Transaction {} failed validation: {}", self.relay_id, txid, e);
+                        return Ok(()); // Skip invalid transactions
+                    }
+                }
+                
+                // Submit the validated transaction to our local Bitcoin node
                 match self.submit_to_bitcoin_node(tx_hex).await {
                     Ok(_) => {
                         info!("Relay-{}: Successfully submitted remote transaction {} to local Bitcoin node", self.relay_id, txid);
@@ -651,6 +671,7 @@ impl Clone for TxRelayServer {
             bitcoin_port: self.bitcoin_port,
             strfry_port: self.strfry_port,
             remote_transactions: Arc::clone(&self.remote_transactions),
+            validator: TransactionValidator::new(ValidationConfig::default(), self.bitcoin_port),
         }
     }
 }

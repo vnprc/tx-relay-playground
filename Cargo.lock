@@ -1691,6 +1691,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thiserror",
  "tokio",
  "tokio-tungstenite",
  "tracing",
