@@ -185,6 +185,7 @@ In testnet, one bitcoin node is configured with `blocksonly=1` so that real tran
 ## Technical Details
 
 - **Language**: Rust with tokio async runtime
+- **Library Architecture**: Flexible URL-based configuration system with network presets
 - **Bitcoin Integration**: RPC calls via reqwest HTTP client
 - **Nostr Protocol**: NIP-01 events with custom kinds for Bitcoin transactions
 - **WebSocket**: tokio-tungstenite for Nostr relay communication
@@ -233,7 +234,7 @@ rpc = 48330
 p2p = 48340
 ```
 
-The system dynamically loads chain-specific configurations using `yq`, ensuring proper port isolation between networks.
+The system dynamically loads chain-specific configurations using `yq`, ensuring proper port isolation between networks. The application layer then constructs appropriate URLs and passes them to the bitcoin-nostr-relay library.
 
 ## Limitations
 

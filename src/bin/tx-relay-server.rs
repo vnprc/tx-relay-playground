@@ -1,5 +1,5 @@
 use anyhow::Result;
-use bitcoin_nostr_relay::{BitcoinNostrRelay, RelayConfig};
+use bitcoin_nostr_relay::{BitcoinNostrRelay, Network, RelayConfig};
 use std::env;
 use tracing::{info, warn};
 
@@ -22,27 +22,28 @@ async fn main() -> Result<()> {
         
     let bitcoin_chain = env::var("BITCOIN_CHAIN").unwrap_or_else(|_| "regtest".to_string());
     
-    // Create configuration based on chain type  
+    // Create configuration based on chain type using new API
     let config = match bitcoin_chain.as_str() {
         "testnet4" => {
             info!("Using testnet4 configuration");
-            RelayConfig::testnet4(relay_id)
+            RelayConfig::for_network(Network::Testnet4, relay_id)
         },
         "regtest" | _ => {
             if bitcoin_chain != "regtest" {
                 warn!("Unknown chain '{}', defaulting to regtest", bitcoin_chain);
             }
             info!("Using regtest configuration");
-            RelayConfig::regtest(relay_id)
+            RelayConfig::for_network(Network::Regtest, relay_id)
         }
     };
     
     info!("🚀 Starting TX Relay Server {}", relay_id);
     info!("🔗 Chain: {}", bitcoin_chain);
     info!("📊 Bitcoin RPC: {}", config.bitcoin_rpc_url);
-    info!("📡 Strfry port: {}", config.strfry_port);
+    info!("📡 Strfry URL: {}", config.strfry_url);
+    info!("🔌 WebSocket: {}", config.websocket_listen_addr);
     info!("⚡ Validation: {}", if config.validation_config.enable_validation { "enabled" } else { "disabled" });
-    info!("⏱️  Mempool polling: {}s", config.mempool_poll_interval_secs);
+    info!("⏱️  Mempool polling: {}s", config.mempool_poll_interval.as_secs());
     
     // Create and start the relay using the library
     let mut relay = BitcoinNostrRelay::new(config)?;
