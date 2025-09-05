@@ -101,6 +101,7 @@ dependencies = [
 [[package]]
 name = "bitcoin-nostr-relay"
 version = "0.1.0"
+source = "git+https://github.com/vnprc/tx-relay.git?rev=ba7ef181#ba7ef1811a05295890619690a67a81495b1f8513"
 dependencies = [
  "anyhow",
  "bitcoin",
