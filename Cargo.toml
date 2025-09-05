@@ -8,7 +8,7 @@ name = "tx-relay-server"
 path = "src/bin/tx-relay-server.rs"
 
 [dependencies]
-bitcoin-nostr-relay = { git = "https://github.com/vnprc/tx-relay.git", rev = "960f4dae" }
+bitcoin-nostr-relay = "0.1.1"
 tokio = { version = "1.0", features = ["full"] }
 anyhow = "1.0"
 tracing = "0.1"

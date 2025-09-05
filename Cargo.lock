@@ -106,8 +106,9 @@ checksum = "9425c3bf7089c983facbae04de54513cce73b41c7f9ff8c845b54e7bc64ebbfb"
 
 [[package]]
 name = "bitcoin-nostr-relay"
-version = "0.1.0"
-source = "git+https://github.com/vnprc/tx-relay.git?rev=960f4dae#960f4dae3c25fbf3d72386e3370c9dce0bebaca3"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f45a5ce15bab913dc79a9069c84ec3bd700af95dbe4ee10e0133e8319b03f0eb"
 dependencies = [
  "anyhow",
  "bitcoin",
