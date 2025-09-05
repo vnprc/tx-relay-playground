@@ -1,2 +1,2 @@
-pub mod bitcoin_rpc;
-pub mod validation;
+// This library has been replaced by the bitcoin-nostr-relay crate
+pub use bitcoin_nostr_relay::*;
