@@ -37,109 +37,20 @@ init:
 
 
 
-# Create transaction and leave in mempool (don't mine block)  
-create-tx node="1" amount="0.00001":
+# Create transaction of specified type
+create-tx type="standard" node="1" amount="0.00001":
     #!/usr/bin/env bash
-    CLI="/nix/store/m2ds8wlwzbljnmw4kasaqn6578a4g7n1-devenv-profile/bin/bitcoin-cli"
-    if [ "{{node}}" = "1" ]; then
-        DATADIR="$PWD/.devenv/state/{{NODE1_DATADIR}}"
-        CONF="$PWD/config/bitcoin-base.conf"
-        RPC_PORT="-rpcport={{NODE1_RPC}}"
-        NODE_NAME="Node 1"
-    elif [ "{{node}}" = "2" ]; then
-        DATADIR="$PWD/.devenv/state/{{NODE2_DATADIR}}"
-        CONF="$PWD/config/bitcoin-base.conf"
-        RPC_PORT="-rpcport={{NODE2_RPC}}"
-        NODE_NAME="Node 2"
-    else
-        echo "Error: node must be 1 or 2"
+    # Check if nodes are running on regtest
+    CURRENT_CHAIN="${BITCOIN_CHAIN:-regtest}"
+    
+    if [ "$CURRENT_CHAIN" != "regtest" ]; then
+        echo "Error: Test transactions require a funded testnet wallet (not yet supported)"
+        echo "Current BITCOIN_CHAIN: $CURRENT_CHAIN"
+        echo "Please restart with: BITCOIN_CHAIN=regtest just up"
         exit 1
     fi
     
-    # Ensure wallet exists and is loaded
-    if ! $CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getwalletinfo >/dev/null 2>&1; then
-        if ! $CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT loadwallet default >/dev/null 2>&1; then
-            $CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT createwallet default >/dev/null 2>&1
-        fi
-    fi
-    
-    # Check wallet balance first
-    BALANCE=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getbalance)
-    if [ $(echo "$BALANCE < {{amount}}" | bc -l) -eq 1 ]; then
-        echo "Error: Insufficient balance. Available: $BALANCE BTC, needed: {{amount}} BTC"
-        exit 1
-    fi
-    
-    # Create raw transaction to keep it in mempool for relay testing
-    ADDR=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getnewaddress)
-    
-    # Get UTXOs for raw transaction creation
-    UTXOS=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default listunspent 1 2>&1)
-    if [ $? -ne 0 ]; then
-        echo "Error getting UTXOs: $UTXOS"
-        exit 1
-    fi
-    
-    # Find a UTXO with enough value (amount + small fee)
-    REQUIRED=$(echo "{{amount}} + 0.000002" | bc -l)
-    UTXO=$(echo "$UTXOS" | jq -r --arg req "$REQUIRED" '.[] | select(.amount >= ($req | tonumber)) | {txid, vout, amount} | @base64' | head -1)
-    
-    if [ -z "$UTXO" ]; then
-        echo "Error: No UTXO found with sufficient funds (need $REQUIRED BTC)"
-        echo "Available UTXOs:"
-        echo "$UTXOS" | jq -r '.[] | "  \(.txid):\(.vout) = \(.amount) BTC"'
-        exit 1
-    fi
-    
-    # Decode UTXO info
-    UTXO_INFO=$(echo "$UTXO" | base64 -d)
-    UTXO_TXID=$(echo "$UTXO_INFO" | jq -r '.txid')
-    UTXO_VOUT=$(echo "$UTXO_INFO" | jq -r '.vout')
-    UTXO_AMOUNT=$(echo "$UTXO_INFO" | jq -r '.amount')
-    
-    # Calculate change (input - amount - fee)
-    CHANGE=$(echo "$UTXO_AMOUNT - {{amount}} - 0.000002" | bc -l)
-    
-    # Create raw transaction with change output
-    if [ $(echo "$CHANGE > 0" | bc -l) -eq 1 ]; then
-        CHANGE_ADDR=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default getnewaddress)
-        RAW_TX=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT createrawtransaction "[{\"txid\":\"$UTXO_TXID\",\"vout\":$UTXO_VOUT}]" "{\"$ADDR\":{{amount}},\"$CHANGE_ADDR\":$CHANGE}" 2>&1)
-    else
-        # No change needed
-        RAW_TX=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT createrawtransaction "[{\"txid\":\"$UTXO_TXID\",\"vout\":$UTXO_VOUT}]" "{\"$ADDR\":{{amount}}}" 2>&1)
-    fi
-    
-    if [ $? -ne 0 ]; then
-        echo "Error creating raw transaction: $RAW_TX"
-        exit 1
-    fi
-    
-    # Sign the transaction
-    SIGNED_TX=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT -rpcwallet=default signrawtransactionwithwallet "$RAW_TX" 2>&1)
-    if [ $? -ne 0 ]; then
-        echo "Error signing transaction: $SIGNED_TX"
-        exit 1
-    fi
-    
-    FINAL_TX=$(echo "$SIGNED_TX" | jq -r '.hex')
-    COMPLETE=$(echo "$SIGNED_TX" | jq -r '.complete')
-    
-    if [ "$COMPLETE" != "true" ]; then
-        echo "Error: Transaction signing incomplete"
-        echo "$SIGNED_TX"
-        exit 1
-    fi
-    
-    # Broadcast to mempool
-    TXID=$($CLI -datadir=$DATADIR -conf=$CONF {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password $RPC_PORT sendrawtransaction "$FINAL_TX" 2>&1)
-    
-    if [ $? -eq 0 ] && [[ "$TXID" =~ ^[a-f0-9]{64}$ ]]; then
-        echo "✓ Transaction $TXID created in $NODE_NAME mempool (not mined yet)"
-    else
-        echo "✗ Transaction failed in $NODE_NAME:"
-        echo "$TXID"
-        exit 1
-    fi
+    ./scripts/create-tx.sh {{type}} {{node}} {{amount}}
 
 
 # Mine blocks to confirm mempool transactions (default: node 1, 1 block)
@@ -248,7 +159,9 @@ status:
     NODE1_INFO=$($CLI -datadir=$PWD/.devenv/state/{{NODE1_DATADIR}} -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport={{NODE1_RPC}} getnetworkinfo 2>/dev/null)
     if [ $? -eq 0 ]; then
         HEIGHT1=$($CLI -datadir=$PWD/.devenv/state/{{NODE1_DATADIR}} -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport={{NODE1_RPC}} getblockcount)
-        echo "  Bitcoin Node 1 - Height: $HEIGHT1"
+        # Check mempool policy from environment variables
+        POLICY1="${BITCOIN_NODE1_CONFIG:-base}"
+        echo "  Bitcoin Node 1 - Height: $HEIGHT1 [Policy: $POLICY1]"
         echo "    TX-Relay-1 RPC (18332)"
         
         # Check if Node 2 P2P connection exists
@@ -267,7 +180,9 @@ status:
     NODE2_INFO=$($CLI -datadir=$PWD/.devenv/state/{{NODE2_DATADIR}} -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport={{NODE2_RPC}} getnetworkinfo 2>/dev/null)
     if [ $? -eq 0 ]; then
         HEIGHT2=$($CLI -datadir=$PWD/.devenv/state/{{NODE2_DATADIR}} -conf=$PWD/config/bitcoin-base.conf {{CHAIN_FLAG}} -rpcuser=user -rpcpassword=password -rpcport={{NODE2_RPC}} getblockcount)
-        echo "  Bitcoin Node 2 - Height: $HEIGHT2"
+        # Check mempool policy from environment variables
+        POLICY2="${BITCOIN_NODE2_CONFIG:-base}"
+        echo "  Bitcoin Node 2 - Height: $HEIGHT2 [Policy: $POLICY2]"
         echo "    TX-Relay-2 RPC (18444)"
         
         # Check if Node 1 P2P connection exists

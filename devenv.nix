@@ -4,7 +4,6 @@ let
   bitcoind = pkgs.bitcoind;
   bitcoinCli = pkgs.bitcoin;
   initScript = "${config.devenv.root}/scripts/init-wallets.sh";
-  bitcoinBaseConf = ./config/bitcoin-base.conf;
 in
 {
   packages = [
@@ -62,10 +61,18 @@ in
       "signet") CHAIN_FLAG="-signet" ;;
     esac
     
-    echo "[$(date)] bitcoind: Starting bitcoind1 (blocks-only for testnet4) with chain: $CHAIN on ports $NODE1_RPC/$NODE1_P2P..."
+    # Determine config file based on environment variable
+    NODE1_CONFIG_TYPE="''${BITCOIN_NODE1_CONFIG:-base}"
+    if [ "$NODE1_CONFIG_TYPE" = "permissive" ]; then
+      NODE1_CONF="${config.devenv.root}/config/bitcoin-permissive.conf"
+    else
+      NODE1_CONF="${config.devenv.root}/config/bitcoin-base.conf"
+    fi
+    
+    echo "[$(date)] bitcoind: Starting bitcoind1 (blocks-only for testnet4) with chain: $CHAIN on ports $NODE1_RPC/$NODE1_P2P using $NODE1_CONFIG_TYPE config..."
     ${bitcoind}/bin/bitcoind \
       -datadir=${config.devenv.root}/.devenv/state/$NODE1_DATADIR \
-      -conf=${bitcoinBaseConf} \
+      -conf=$NODE1_CONF \
       $CHAIN_FLAG \
       $NODE1_EXTRA_FLAGS \
       -port=$NODE1_P2P \
@@ -77,7 +84,7 @@ in
     counter=0
     until ${bitcoinCli}/bin/bitcoin-cli \
       -datadir=${config.devenv.root}/.devenv/state/$NODE1_DATADIR \
-      -conf=${bitcoinBaseConf} \
+      -conf=$NODE1_CONF \
       $CHAIN_FLAG \
       -rpcuser=user \
       -rpcpassword=password \
@@ -103,7 +110,7 @@ in
     NODE2_P2P=$(yq eval ".bitcoin.$CHAIN.node2.p2p" config/ports.toml)
     ${bitcoinCli}/bin/bitcoin-cli \
       -datadir=${config.devenv.root}/.devenv/state/$NODE1_DATADIR \
-      -conf=${bitcoinBaseConf} \
+      -conf=$NODE1_CONF \
       $CHAIN_FLAG \
       -rpcuser=user \
       -rpcpassword=password \
@@ -138,10 +145,18 @@ in
       "signet") CHAIN_FLAG="-signet" ;;
     esac
     
-    echo "[$(date)] bitcoind2: Starting bitcoind2 (full tx relay for testnet4) with chain: $CHAIN on ports $NODE2_RPC/$NODE2_P2P..."
+    # Determine config file based on environment variable
+    NODE2_CONFIG_TYPE="''${BITCOIN_NODE2_CONFIG:-base}"
+    if [ "$NODE2_CONFIG_TYPE" = "permissive" ]; then
+      NODE2_CONF="${config.devenv.root}/config/bitcoin-permissive.conf"
+    else
+      NODE2_CONF="${config.devenv.root}/config/bitcoin-base.conf"
+    fi
+    
+    echo "[$(date)] bitcoind2: Starting bitcoind2 (full tx relay for testnet4) with chain: $CHAIN on ports $NODE2_RPC/$NODE2_P2P using $NODE2_CONFIG_TYPE config..."
     ${bitcoind}/bin/bitcoind \
       -datadir=${config.devenv.root}/.devenv/state/$NODE2_DATADIR \
-      -conf=${bitcoinBaseConf} \
+      -conf=$NODE2_CONF \
       $CHAIN_FLAG \
       $NODE2_EXTRA_FLAGS \
       -port=$NODE2_P2P \
@@ -153,7 +168,7 @@ in
     counter=0
     until ${bitcoinCli}/bin/bitcoin-cli \
       -datadir=${config.devenv.root}/.devenv/state/$NODE2_DATADIR \
-      -conf=${bitcoinBaseConf} \
+      -conf=$NODE2_CONF \
       $CHAIN_FLAG \
       -rpcuser=user \
       -rpcpassword=password \
@@ -179,7 +194,7 @@ in
     NODE1_P2P=$(yq eval ".bitcoin.$CHAIN.node1.p2p" config/ports.toml)
     ${bitcoinCli}/bin/bitcoin-cli \
       -datadir=${config.devenv.root}/.devenv/state/$NODE2_DATADIR \
-      -conf=${bitcoinBaseConf} \
+      -conf=$NODE2_CONF \
       $CHAIN_FLAG \
       -rpcuser=user \
       -rpcpassword=password \
@@ -352,9 +367,17 @@ in
       "signet") CHAIN_FLAG="-signet" ;;
     esac
     
+    # Determine config file based on environment variable (same as bitcoind1)
+    NODE1_CONFIG_TYPE="''${BITCOIN_NODE1_CONFIG:-base}"
+    if [ "$NODE1_CONFIG_TYPE" = "permissive" ]; then
+      NODE1_CONF="${config.devenv.root}/config/bitcoin-permissive.conf"
+    else
+      NODE1_CONF="${config.devenv.root}/config/bitcoin-base.conf"
+    fi
+    
     until bitcoin-cli \
       -datadir=${config.devenv.root}/.devenv/state/$NODE1_DATADIR \
-      -conf=${bitcoinBaseConf} \
+      -conf=$NODE1_CONF \
       $CHAIN_FLAG \
       -rpcuser=user \
       -rpcpassword=password \
@@ -392,7 +415,7 @@ in
     echo "[$(date)] tx-relay-1: Checking if wallet initialization is needed..."
     HEIGHT=$(bitcoin-cli \
       -datadir=${config.devenv.root}/.devenv/state/$NODE1_DATADIR \
-      -conf=${bitcoinBaseConf} \
+      -conf=$NODE1_CONF \
       $CHAIN_FLAG \
       -rpcuser=user \
       -rpcpassword=password \
@@ -435,9 +458,17 @@ in
       "signet") CHAIN_FLAG="-signet" ;;
     esac
     
+    # Determine config file based on environment variable (same as bitcoind2)
+    NODE2_CONFIG_TYPE="''${BITCOIN_NODE2_CONFIG:-base}"
+    if [ "$NODE2_CONFIG_TYPE" = "permissive" ]; then
+      NODE2_CONF="${config.devenv.root}/config/bitcoin-permissive.conf"
+    else
+      NODE2_CONF="${config.devenv.root}/config/bitcoin-base.conf"
+    fi
+    
     until bitcoin-cli \
       -datadir=${config.devenv.root}/.devenv/state/$NODE2_DATADIR \
-      -conf=${bitcoinBaseConf} \
+      -conf=$NODE2_CONF \
       $CHAIN_FLAG \
       -rpcuser=user \
       -rpcpassword=password \
@@ -475,7 +506,7 @@ in
     echo "[$(date)] tx-relay-2: Checking if wallet initialization is needed..."
     HEIGHT=$(bitcoin-cli \
       -datadir=${config.devenv.root}/.devenv/state/$NODE2_DATADIR \
-      -conf=${bitcoinBaseConf} \
+      -conf=$NODE2_CONF \
       $CHAIN_FLAG \
       -rpcuser=user \
       -rpcpassword=password \
